@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .graph import graph
+from . import cost
 
 app = FastAPI(title="Orkester")
 
@@ -38,10 +39,12 @@ def chat(req: Req):
     if not req.text and not req.files:
         raise HTTPException(400, "send at least some text or a file")
 
+    cost.reset()   # fresh counter per request
+
     file_inputs = [{
-        "src":         f.name,
-        "blob":        base64.b64decode(f.data),
-        "mime":        f.mime,
+        "src":          f.name,
+        "blob":         base64.b64decode(f.data),
+        "mime":         f.mime,
         "force_vision": req.force_vision
     } for f in req.files]
 
@@ -59,4 +62,5 @@ def chat(req: Req):
         "plan_trace":   result["plan_trace"],
         "clarifying_q": result.get("clarifying_q"),
         "answer":       result.get("answer"),
+        "usage":        cost.get_summary(),
     }

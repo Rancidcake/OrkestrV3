@@ -79,6 +79,9 @@ function Extracted({ items }) {
                 {r.pages && (
                   <span className="text-[10px] text-stone-400">{r.pages}p</span>
                 )}
+                {r.confidence != null && (
+                  <span className="text-[10px] text-stone-400">conf {r.confidence}%</span>
+                )}
               </div>
               {r.text && <p className="text-[11px] text-stone-400 line-clamp-3 leading-relaxed">{r.text}</p>}
               {r.err  && <p className="text-[11px] text-red-400">{r.err}</p>}
@@ -86,6 +89,31 @@ function Extracted({ items }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function UsageBadge({ usage }) {
+  if (!usage) return null
+  const usd = usage.total_usd < 0.000001
+    ? "<$0.000001"
+    : `~$${usage.total_usd.toFixed(6)}`
+  const co2 = usage.total_co2_g < 0.001
+    ? "<0.001"
+    : usage.total_co2_g.toFixed(3)
+  return (
+    <div className="flex items-center gap-2 mt-1.5 px-1 flex-wrap">
+      <span className="text-[10px] text-stone-400">
+        cost <span className="text-stone-600 font-medium">{usd}</span>
+      </span>
+      <span className="text-stone-300 text-[10px]">·</span>
+      <span className="text-[10px] text-stone-400">
+        carbon <span className="text-stone-600 font-medium">{co2} gCO₂e</span>
+      </span>
+      <span className="text-stone-300 text-[10px]">·</span>
+      <span className="text-[10px] text-stone-400">
+        <span className="text-stone-600 font-medium">{usage.total_tokens}</span> tokens
+      </span>
     </div>
   )
 }
@@ -98,6 +126,7 @@ function AgentBubble({ msg }) {
       <div className="bg-white border border-stone-200 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-stone-800 whitespace-pre-wrap shadow-sm mt-1.5 leading-relaxed">
         {msg.clarifying_q ?? msg.answer ?? "…"}
       </div>
+      <UsageBadge usage={msg.usage} />
     </div>
   )
 }

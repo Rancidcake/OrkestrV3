@@ -1,5 +1,6 @@
 import io, re, base64, os
 import logging
+from . import cost
 
 import cv2
 import numpy as np
@@ -14,6 +15,7 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 from groq import Groq
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
 
 log = logging.getLogger("orkester.extract")
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s [%(name)s] %(message)s")
@@ -21,6 +23,19 @@ logging.basicConfig(level=logging.DEBUG, format="%(levelname)s [%(name)s] %(mess
 _groq    = Groq()
 _gem     = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 _mistral = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
+
+# YouTube blocks cloud IPs — use proxy if configured
+_ws_user = os.environ.get("WEBSHARE_PROXY_USER")
+_ws_pass = os.environ.get("WEBSHARE_PROXY_PASS")
+if _ws_user and _ws_pass:
+    _yt = YouTubeTranscriptApi(proxies=WebshareProxyConfig(
+        proxy_username=_ws_user,
+        proxy_password=_ws_pass,
+    ))
+    log.info("YouTube transcript using Webshare proxy")
+else:
+    _yt = YouTubeTranscriptApi()
+    log.warning("No proxy set — YouTube may block transcript requests on cloud IPs")
 
 YT_PAT   = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})")
 _TCONF   = 68
@@ -149,11 +164,14 @@ def _vision_read(img):
             contents=[Part.from_bytes(data=buf.getvalue(), mime_type="image/png"),
                       "Extract all text from this image exactly as it appears. Return only the text."]
         )
+        cost.add_vision(1)
         return r.text.strip()
     except Exception as e:
         log.warning("Gemini blocked (%s) — Mistral OCR fallback", type(e).__name__)
     try:
-        return _mistral_ocr(img)
+        txt = _mistral_ocr(img)
+        cost.add_vision(1)
+        return txt
     except Exception as e2:
         log.warning("Mistral OCR failed (%s) — tesseract fallback", e2)
         clean = _prep(np.array(img))
@@ -198,11 +216,13 @@ def read_pdf(blob, ocr=True, force_vision=False):
             log.debug("page %d [%s] — %d chars", i + 1, tag, len(txt))
     else:
         log.info("starting OCR on %d pages at 300dpi", len(rendered))
+        all_confs = []
         for i, pg in enumerate(rendered):
             clean = _prep(np.array(pg))
             d     = pytesseract.image_to_data(clean, output_type=pytesseract.Output.DICT)
             confs = [c for c in d["conf"] if c != -1]
             avg   = sum(confs)/len(confs) if confs else 0
+            all_confs.extend(confs)
 
             log.debug("page %d — tesseract avg conf: %.1f", i + 1, avg)
 
@@ -219,11 +239,13 @@ def read_pdf(blob, ocr=True, force_vision=False):
                 log.debug("page %d — vision returned %d chars", i + 1, len(txt))
 
     text   = "\n\n".join(out).strip()
+    avg_conf = round(sum(all_confs) / len(all_confs), 1) if all_confs else None
     result = {
-        "text":  text,
-        "how":   "ocr",
-        "pages": len(rendered),
-        "debug": " | ".join(page_log)
+        "text":       text,
+        "how":        "ocr",
+        "pages":      len(rendered),
+        "confidence": avg_conf,
+        "debug":      " | ".join(page_log)
     }
     hits = YT_PAT.findall(text)
     if hits:
@@ -264,6 +286,7 @@ def transcribe(blob, fname):
         model="whisper-large-v3",
         response_format="verbose_json"
     )
+    cost.add_audio(tx.duration)
     return {"text": tx.text, "secs": tx.duration}
 
 
@@ -274,7 +297,7 @@ def yt_transcript(url):
 
     vid = m.group(1)
     try:
-        tx = YouTubeTranscriptApi().fetch(vid)
+        tx = _yt.fetch(vid)
         return {"text": " ".join(s.text for s in tx), "vid": vid}
     except Exception as e:
         return {"text": None, "vid": vid, "err": str(e)}

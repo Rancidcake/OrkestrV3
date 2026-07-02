@@ -21,12 +21,17 @@ def _ctx(extracted):
     for r in extracted:
         if r.get("text"):
             label = r["src"]
-            if r.get("secs"):   # audio — tell the planner so it defaults to summarize
+            if r.get("secs"):
                 m, s = divmod(int(r["secs"]), 60)
                 label += f" [audio transcript, {m}m{s}s]"
             elif r.get("how") == "ocr":
-                label += " [scanned PDF]"
-            parts.append(f"[{label}]\n{r['text'][:1000]}")
+                conf  = f", OCR confidence {r['confidence']}%" if r.get("confidence") else ""
+                label += f" [scanned PDF{conf}]"
+            elif r.get("method") in ("vision", "mistral-ocr", "tess"):
+                label += f" [image, method={r['method']}]"
+            elif r.get("vid"):
+                label += " [youtube transcript]"
+            parts.append(f"[{label}]\n{r['text'][:1200]}")
     return "\n\n".join(parts)
 
 def do_extract(state):
@@ -60,29 +65,49 @@ def do_plan(state):
             "action": "execute", "tools": ["qa"]
         }}], "answer": answer}
 
-    # Magic prompt - FIXME: move to config
-    raw = call(f"""You are an agent planner. Decide what to do based on content and query.
+    n_sources = len([r for r in state["extracted"] if r.get("text")])
 
-CONTENT:
+    # magic prompt — FIXME: move to config eventually
+    raw = call(f"""You are a strict agent planner. Your job is to decide what action to take given content and a user query.
+
+SOURCES ({n_sources} total):
 {ctx}
 
-QUERY: {query}
+USER QUERY: {query if query else "(no query provided)"}
 
-Output JSON only. No explanation.
+Output JSON only. No markdown, no explanation.
 
-If the query is ambiguous or unclear:
-{{"action": "clarify", "question": "your question here"}}
+━━ CLARIFY RULE (strict) ━━
+You MUST output clarify if ANY of these are true:
+- The query is empty or vague ("do something", "help", "analyze this") AND the content is not audio
+- Two or more tasks are equally plausible from the query alone
+- The user asks for something that could mean multiple things
+Example: {{"action": "clarify", "question": "Could you clarify whether you want a summary or sentiment analysis?"}}
 
-If the task is clear, pick the minimum tools needed:
-{{"action": "execute", "tools": ["summarize" | "sentiment" | "code_explain" | "compare" | "qa"]}}
+━━ EXECUTE RULE ━━
+Only output execute when the intent is unambiguous. Use the MINIMUM tools needed.
+{{"action": "execute", "tools": [<tool>, ...]}}
 
-Rules:
-- compare only when 2+ inputs need to be compared against each other
-- summarize for summary requests
-- sentiment for tone/feeling requests
-- code_explain when code is present and explanation is requested
-- qa for everything else
-- for audio transcripts (labelled [audio transcript, ...]), prefer summarize unless the user asks a specific question""")
+Available tools and when to use them:
+- summarize     → user asks for summary / overview / TLDR; OR input is audio (always auto-summarize audio)
+- sentiment     → user asks about tone, feeling, opinion, positivity/negativity
+- code_explain  → code is present AND user asks for explanation, bugs, or complexity
+- compare       → 2+ sources AND user wants comparison or similarity analysis
+- qa            → user asks a specific factual question about the content
+
+━━ CROSS-INPUT RULE ━━
+If the user's query references content across multiple sources (e.g. "compare these two" or "what does the PDF say about the topic in the audio"), use compare or qa with all context combined.
+
+━━ AUDIO RULE ━━
+If any source is labelled [audio transcript, ...] and the query is empty or asks for summary → use summarize. Do not clarify for audio-only inputs with no query.
+
+━━ EXAMPLES ━━
+query="summarize" → {{"action": "execute", "tools": ["summarize"]}}
+query="what is the sentiment?" → {{"action": "execute", "tools": ["sentiment"]}}
+query="explain this code" → {{"action": "execute", "tools": ["code_explain"]}}
+query="do something with this" → {{"action": "clarify", "question": "What would you like me to do — summarize, analyze sentiment, or ask a specific question?"}}
+query="" + audio source → {{"action": "execute", "tools": ["summarize"]}}
+query="" + PDF source → {{"action": "clarify", "question": "What would you like me to do with this document?"}}""")
 
     try:
         plan = json.loads(raw)
