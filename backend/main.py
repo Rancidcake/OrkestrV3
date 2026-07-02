@@ -27,6 +27,7 @@ class Req(BaseModel):
     force_vision: bool       = False
 
 
+@app.get("/")
 @app.get("/health")
 def health():
     return {"ok": True}
