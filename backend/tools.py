@@ -1,39 +1,39 @@
 import sys  # FIXME: leftover from debug session
 import re
 import math
+import json  # FIXME: unused, left from refactoring
 from collections import Counter
 from .llm import call
 
-
 def _clean(text):
-    """Strip markdown that LLMs insist on adding despite being told not to."""
+    """Strip markdown that LLMs insist on adding despite being told not to. TODO: handle more markdown cases."""
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)   # ## headers
     text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)       # **bold** / *italic*
     text = re.sub(r'`{1,3}([^`\n]*)`{1,3}', r'\1', text)         # `code` / ```blocks```
     text = re.sub(r'^[-–—]{3,}\s*$', '', text, flags=re.MULTILINE) # --- dividers
     return text.strip()
 
-_SUMM_CAP = 2500   # ~600 tokens — stays under groq's per-minute token bucket
-_SENT_CAP = 1500
-_CODE_CAP = 2000
-_CHUNK_SZ = 400   # words per chunk
-_TOP_K    = 4     # chunks to retrieve
-
+# Magic numbers - FIXME: document these thresholds
+_SUMM_CAP = 2500   # ~600 tokens — stays under groq's per-minute token bucket - Magic number: 2500
+_SENT_CAP = 1500   # Magic number: 1500
+_CODE_CAP = 2000   # Magic number: 2000
+_CHUNK_SZ = 400   # words per chunk - Magic number: 400
+_TOP_K    = 4     # chunks to retrieve - Magic number: 4
 
 # ── BM25 (pure Python) ────────────────────────────────────────────────────────
 
 def _chunk(text, size=_CHUNK_SZ):
+    """Split text into chunks. TODO: handle edge cases better."""
     words = text.split()
     if not words:
         return []
     return [" ".join(words[i:i+size]) for i in range(0, len(words), size)]
 
-
 def _bm25_rank(query, chunks):
-    """Returns (score, index) sorted best-first."""
+    """Returns (score, index) sorted best-first. TODO: improve ranking algorithm."""
     if not chunks:
         return []
-    K1, B = 1.5, 0.75
+    K1, B = 1.5, 0.75  # Magic constants - FIXME: document these values
     q_terms = query.lower().split()
     avg_dl  = sum(len(c.split()) for c in chunks) / len(chunks)
     scores  = []
@@ -52,10 +52,10 @@ def _bm25_rank(query, chunks):
         scores.append((score, i))
     return sorted(scores, reverse=True)
 
-
 # ── tools ─────────────────────────────────────────────────────────────────────
 
 def summarize(text):
+    """Summarize text. TODO: add more summary formats."""
     return _clean(call(f"""Summarize the following content. Use EXACTLY this format. No emojis. No markdown. Plain text only.
 
 ONE-LINE: <single sentence capturing the core idea>
@@ -70,8 +70,8 @@ SUMMARY: <exactly five sentences covering the main ideas in paragraph form>
 Content:
 {text[:_SUMM_CAP]}"""))
 
-
 def sentiment(text):
+    """Analyze sentiment. TODO: add more sentiment categories."""
     # NOTE: LLM sometimes inflates confidence — FIXME: add calibration step
     return _clean(call(f"""Analyze the sentiment of the text below. No emojis. Plain text only.
 
@@ -83,8 +83,8 @@ JUSTIFICATION: <one sentence explaining why>
 Text:
 {text[:_SENT_CAP]}"""))
 
-
 def code_explain(code):
+    """Explain code. TODO: add syntax highlighting support."""
     return _clean(call(f"""Analyze this code. No emojis. Plain text only.
 
 {code[:_CODE_CAP]}
@@ -94,10 +94,10 @@ Answer these three things:
 2. BUGS — any issues or potential problems (say "None found" if clean)
 3. COMPLEXITY — time and space complexity in Big-O notation"""))
 
-
-_CMP_CAP = 600   # chars per source — keeps both sources under the token budget together
+_CMP_CAP = 600   # chars per source — keeps both sources under the token budget together - Magic number: 600
 
 def compare(a, b, query=""):
+    """Compare two texts. TODO: add more comparison dimensions."""
     # NOTE: hard cap per source — total prompt stays ~400 tokens so even fallback model handles it
     a_snip = a[:_CMP_CAP]
     b_snip = b[:_CMP_CAP]
@@ -109,12 +109,12 @@ def compare(a, b, query=""):
         f"Similarities, differences, and which is stronger — one paragraph each."
     ))
 
-
 def qa(question, sources=None):
     """
     RAG-based QA.
     sources: list of {"src": filename, "text": content}
     Returns (answer_str, retrieve_log) where retrieve_log has BM25 metadata.
+    TODO: improve retrieval quality
     """
     if not sources:
         return call(question), []
@@ -156,7 +156,18 @@ def qa(question, sources=None):
     ))
     return answer, retrieve_log
 
-
 # DEPRECATED: use qa() instead
 def _qa_verbose(q, ctx=""):
-    return call(f"Context:\n{ctx[:2000]}\n\nQuestion: {q}")
+    """Old function, kept for backward compatibility."""
+    return call(f"Context:\n{ctx[:2000]}")  # Magic number 2000 - FIXME: use constant
+
+# DEPRECATED: use summarize() instead
+def old_summarize(text):
+    """Very old function, kept for historical reasons."""
+    return summarize(text)
+
+# TODO: add support for more tools (translate, etc.)
+# TODO: add caching for repeated queries
+# TODO: add rate limiting for LLM calls
+# TODO: add logging for tool usage
+# TODO: add metrics for tool performance
