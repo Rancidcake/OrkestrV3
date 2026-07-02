@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react"
 import { Send, Paperclip, X, ChevronDown, ChevronRight } from "lucide-react"
+import "../lib/firebase"
 
 // backend calls go through Next.js rewrites — no cross-origin issues
 const API = process.env.NEXT_PUBLIC_API_URL ?? ""

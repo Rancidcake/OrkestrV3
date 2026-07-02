@@ -1,0 +1,11 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+tests
+node_modules
+frontend/node_modules
+frontend/.next
+.env
+.env.local
+deploy_gcp.sh
