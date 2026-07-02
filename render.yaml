@@ -12,3 +12,12 @@ services:
         sync: false
       - key: MISTRAL_API_KEY
         sync: false
+
+  - type: web
+    name: orkester-frontend
+    env: docker
+    dockerfilePath: ./frontend/Dockerfile
+    plan: free
+    envVars:
+      - key: BACKEND_URL
+        sync: false
