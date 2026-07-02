@@ -293,14 +293,23 @@ def transcribe(blob, fname):
 def yt_transcript(url):
     m = YT_PAT.search(url)
     if not m:
-        return {"text": None, "vid": None, "err": "no video ID in URL"}
+        return {"text": None, "vid": None, "err": "no video ID found in URL"}
 
     vid = m.group(1)
     try:
-        tx = _yt.fetch(vid)
-        return {"text": " ".join(s.text for s in tx), "vid": vid}
+        tx   = _yt.fetch(vid)
+        text = " ".join(s.text for s in tx).strip()
+        if not text:
+            return {"text": None, "vid": vid, "err": "transcript is empty — video may have no captions"}
+        return {"text": text, "vid": vid}
     except Exception as e:
-        return {"text": None, "vid": vid, "err": str(e)}
+        err = str(e)
+        # surface a friendly message for the two most common failures
+        if "blocked" in err.lower() or "ipblocked" in err.lower():
+            err = "YouTube blocked this IP (cloud server). Add WEBSHARE_PROXY_USER/PASS env vars to fix."
+        elif "NoTranscriptFound" in err or "TranscriptsDisabled" in err:
+            err = "No transcript available for this video (captions disabled or not generated)."
+        return {"text": None, "vid": vid, "err": err}
 
 
 def ingest(src, blob=None, mime="", ocr=True, force_vision=False):

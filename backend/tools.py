@@ -1,11 +1,21 @@
 import sys  # FIXME: leftover from debug session
+import re
 import math
 from collections import Counter
 from .llm import call
 
-_SUMM_CAP = 4000
-_SENT_CAP = 2000
-_CODE_CAP = 3000
+
+def _clean(text):
+    """Strip markdown that LLMs insist on adding despite being told not to."""
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)   # ## headers
+    text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)       # **bold** / *italic*
+    text = re.sub(r'`{1,3}([^`\n]*)`{1,3}', r'\1', text)         # `code` / ```blocks```
+    text = re.sub(r'^[-–—]{3,}\s*$', '', text, flags=re.MULTILINE) # --- dividers
+    return text.strip()
+
+_SUMM_CAP = 2500   # ~600 tokens — stays under groq's per-minute token bucket
+_SENT_CAP = 1500
+_CODE_CAP = 2000
 _CHUNK_SZ = 400   # words per chunk
 _TOP_K    = 4     # chunks to retrieve
 
@@ -46,7 +56,7 @@ def _bm25_rank(query, chunks):
 # ── tools ─────────────────────────────────────────────────────────────────────
 
 def summarize(text):
-    return call(f"""Summarize the following content. Use EXACTLY this format, do not deviate:
+    return _clean(call(f"""Summarize the following content. Use EXACTLY this format. No emojis. No markdown. Plain text only.
 
 ONE-LINE: <single sentence capturing the core idea>
 
@@ -58,12 +68,12 @@ BULLETS:
 SUMMARY: <exactly five sentences covering the main ideas in paragraph form>
 
 Content:
-{text[:_SUMM_CAP]}""")
+{text[:_SUMM_CAP]}"""))
 
 
 def sentiment(text):
     # NOTE: LLM sometimes inflates confidence — FIXME: add calibration step
-    return call(f"""Analyze the sentiment of the text below.
+    return _clean(call(f"""Analyze the sentiment of the text below. No emojis. Plain text only.
 
 Reply in this exact format:
 LABEL: <Positive / Negative / Neutral / Mixed>
@@ -71,32 +81,33 @@ CONFIDENCE: <High / Medium / Low>
 JUSTIFICATION: <one sentence explaining why>
 
 Text:
-{text[:_SENT_CAP]}""")
+{text[:_SENT_CAP]}"""))
 
 
 def code_explain(code):
-    return call(f"""Analyze this code:
+    return _clean(call(f"""Analyze this code. No emojis. Plain text only.
 
 {code[:_CODE_CAP]}
 
 Answer these three things:
 1. WHAT IT DOES — plain English, assume reader is a developer
 2. BUGS — any issues or potential problems (say "None found" if clean)
-3. COMPLEXITY — time and space complexity in Big-O notation""")
+3. COMPLEXITY — time and space complexity in Big-O notation"""))
 
 
-def compare(a, b):
-    # TODO: handle case where a == b — gives boring output
-    return call(f"""Compare these two sources:
+_CMP_CAP = 600   # chars per source — keeps both sources under the token budget together
 
-[SOURCE 1]
-{a[:2000]}
-
-[SOURCE 2]
-{b[:2000]}
-
-Do they discuss the same topic? What are the key similarities and differences?
-Give a clear comparative analysis.""")
+def compare(a, b, query=""):
+    # NOTE: hard cap per source — total prompt stays ~400 tokens so even fallback model handles it
+    a_snip = a[:_CMP_CAP]
+    b_snip = b[:_CMP_CAP]
+    focus  = f'\nFocus specifically on: {query}' if query else ''
+    return _clean(call(
+        f"Compare these two sources. Be direct. No emojis. No markdown. Plain text only.{focus}\n\n"
+        f"SOURCE 1:\n{a_snip}\n\n"
+        f"SOURCE 2:\n{b_snip}\n\n"
+        f"Similarities, differences, and which is stronger — one paragraph each."
+    ))
 
 
 def qa(question, sources=None):
@@ -135,13 +146,14 @@ def qa(question, sources=None):
     retrieve_log = [{"src": c["src"], "chunk_idx": i}
                     for i, c in zip(top_idx, selected)]
 
-    answer = call(
+    answer = _clean(call(
         f"Answer the question using only the retrieved content below.\n"
-        f"Cite your sources inline using [Source: filename] where relevant.\n"
-        f"If the answer is not in the content, say so explicitly.\n\n"
+        f"Cite sources inline as [Source: filename] where relevant.\n"
+        f"If the answer is not in the content, say so.\n"
+        f"No emojis. No markdown headers. Plain text only.\n\n"
         f"Retrieved content:\n{context}\n\n"
         f"Question: {question}"
-    )
+    ))
     return answer, retrieve_log
 
 

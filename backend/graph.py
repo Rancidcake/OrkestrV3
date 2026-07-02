@@ -105,18 +105,28 @@ def _classify(query, extracted):
     if q in _vague or q.rstrip("?!.") in _vague:
         return "clarify", "Could you clarify — summary, sentiment analysis, or a specific question?"
 
-    if re.search(r"\b(summar|tldr|overview|brief|outline|key points?)\b", q):
+    # NOTE: no trailing \b on stems — "summar" must match "summarize", "summarise", etc.
+    if re.search(r"\bsummar|\btldr|\boverview\b|\bbrief\b|\boutline\b|\bkey\s+points?", q):
         return "execute", ["summarize"]
 
-    if re.search(r"\b(sentiment|tone|feeling|emotion|positive|negative|opinion|mood)\b", q):
+    if re.search(r"\bsentiment\b|\btone\b|\bfeeling\b|\bemotion\b|\bpositive\b|\bnegative\b|\bopinion\b|\bmood\b", q):
         return "execute", ["sentiment"]
 
-    if re.search(r"\b(explain|what does|how does|bug|error|complexity|time complex|space complex)\b", q):
+    if re.search(r"\bexplain\b|\bhow\s+does\b|\bbug\b|\berror\b|\bcomplexity\b|\btime\s+complex|\bspace\s+complex", q):
         all_text = " ".join(r.get("text", "") for r in texts)
-        if re.search(r"(def |class |function |import |=>|\bvar\b|\bconst\b|=>|{)", all_text):
+        if re.search(r"(def |class |function |import |=>|\bvar\b|\bconst\b|{)", all_text):
             return "execute", ["code_explain"]
 
-    if re.search(r"\b(compar|differ|similar|versus|vs\.?|contrast|same topic|both)\b", q) and n_sources >= 2:
+    # trailing \b removed intentionally — "compar" is a stem, not a full word
+    # also catch "comapre" style typos via the two-source + who/which heuristic
+    _cmp = (r"\bcompa[rn]|\bversus|\bvs\.?\s|\bcontrast|\bdiffer"
+            r"|\bwho.{0,8}(better|best|good.?fit|stronger|suit)"
+            r"|\bwhich.{0,10}(better|prefer|choose|pick|suit)"
+            r"|\bboth\s+(of\s+)?these")
+    if re.search(_cmp, q) and n_sources >= 2:
+        return "execute", ["compare"]
+    # fallback: 2 sources + explicit "two" = compare
+    if n_sources >= 2 and re.search(r"\btwo\b|\bboth\b", q) and len(q) < 80:
         return "execute", ["compare"]
 
     return "execute", ["qa"]
@@ -187,7 +197,7 @@ def do_execute(state):
                           "sources": [s["src"] for s in srcs]})
 
         elif t == "compare" and len(texts) >= 2:
-            out = tools.compare(texts[0], texts[1])
+            out = tools.compare(texts[0], texts[1], query=query)
             trace.append({"step": "tool", "tool": "compare",
                           "sources": [srcs[0]["src"], srcs[1]["src"]]})
 

@@ -27,7 +27,7 @@ function badgeClass(how, method) {
   return "bg-stone-100 text-stone-500 border border-stone-200"
 }
 
-const STEP_ICON = { extract: "📄", plan: "🧠", retrieve: "🔍", tool: "🔧", error: "❌" }
+const STEP_ICON = { extract: "·", plan: "·", retrieve: "·", tool: "·", error: "·" }
 const METHOD_COLOR = {
   native: "text-emerald-600", ocr: "text-amber-600", vision: "text-blue-600",
   "mistral-ocr": "text-violet-600", audio: "text-pink-600", youtube: "text-red-600",
