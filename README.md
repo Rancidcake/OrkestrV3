@@ -63,3 +63,5 @@ The frontend proxies `/chat` and `/health` to the backend. Open http://localhost
 **Backend**: Connect your repo to Render. It auto-detects `render.yaml` for Docker deployment on the free tier, with `/health` as the check endpoint. Add the three API keys as environment variables in the Render dashboard.
 
 **Frontend**: Connect your repo to Vercel, set the root directory to `frontend`, and add `BACKEND_URL=https://your-render-url.onrender.com` as an environment variable.
+
+## FYI , Images go girectly to the vision models.
