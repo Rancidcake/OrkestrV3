@@ -1,4 +1,4 @@
-import io, re, base64, os
+import io, re, base64, os, sys  # FIXME: sys unused, left from debugging
 import logging
 from . import cost
 
@@ -21,7 +21,7 @@ log = logging.getLogger("orkester.extract")
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s [%(name)s] %(message)s")
 
 _groq    = Groq()
-_gem     = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+_gem     = genai.Client(api_key=os.environ["GEMINI_API_KEY"])  # TODO: handle missing env vars gracefully
 _mistral = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
 
 # YouTube blocks cloud IPs — use proxy if configured
@@ -35,10 +35,10 @@ if _ws_user and _ws_pass:
     log.info("YouTube transcript using Webshare proxy")
 else:
     _yt = YouTubeTranscriptApi()
-    log.warning("No proxy set — YouTube may block transcript requests on cloud IPs")
+    log.warning("No proxy set — YouTube may block transcript requests on cloud IPs")  # TODO: add retry logic
 
 YT_PAT   = re.compile(r"https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})")
-_TCONF   = 68
+_TCONF   = 68  # Magic threshold - FIXME: document where this came from
 
 # SCC Online / Taxmann stamp the full copyright block on every page.
 # After stripping, a real judgment has hundreds of chars; leftover boilerplate is ~80.
@@ -55,15 +55,15 @@ _WATERMARK = re.compile(
     r"Page \d+\s+(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[^\n]*\n?",
     re.IGNORECASE
 )
-_MIN_REAL = 300
-
+_MIN_REAL = 300  # Magic number - FIXME: needs validation for different document types
 
 def _clean(text):
+    """Remove watermarks from text. TODO: add more patterns."""
     text = _WATERMARK.sub("", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
-
 def _unlock(blob):
+    """Unlock encrypted PDF. TODO: handle corrupted PDFs."""
     try:
         with pikepdf.open(io.BytesIO(blob)) as pdf:
             buf = io.BytesIO()
@@ -73,10 +73,10 @@ def _unlock(blob):
             return unlocked
     except Exception as e:
         log.debug("pikepdf unlock skipped: %s", e)
-        return blob
-
+        return blob  # HACK: return original if unlock fails
 
 def _pdf_text(blob):
+    """Extract text from PDF. FIXME: memory issues with large PDFs."""
     blob = _unlock(blob)
     with pdfplumber.open(io.BytesIO(blob)) as f:
         raw  = [pg.extract_text() for pg in f.pages]
@@ -109,22 +109,22 @@ def _pdf_text(blob):
     log.info("native text failed both — will OCR (body was %d chars after strip)", len(body))
     return "", n
 
-
 def _prep(page_arr):
+    """Preprocess image for OCR. TODO: test with color documents."""
     gray = cv2.cvtColor(page_arr, cv2.COLOR_RGB2GRAY)
 
     bg   = cv2.dilate(gray, np.ones((15, 15), np.uint8))
     gray = cv2.divide(gray, bg, scale=255)
     # tried bilateral filter here — slower, didn't help on b&w scans
-    gray = cv2.fastNlMeansDenoising(gray, h=10)
+    gray = cv2.fastNlMeansDenoising(gray, h=10)  # Magic param h=10 - FIXME: make configurable
 
     _, inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     pts    = np.column_stack(np.where(inv > 0))
 
-    if len(pts) > 100:
+    if len(pts) > 100:  # Magic number 100 - FIXME: document this threshold
         angle = cv2.minAreaRect(pts)[-1]
         if angle < -45: angle += 90
-        if abs(angle) > 1.5:
+        if abs(angle) > 1.5:  # Magic threshold - FIXME: document this
             h, w = gray.shape
             M    = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
             gray = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC,
@@ -137,25 +137,26 @@ def _prep(page_arr):
     black_ratio = np.sum(out == 0) / out.size
     log.debug("Otsu black ratio: %.2f", black_ratio)
 
-    if black_ratio > 0.55:
+    if black_ratio > 0.55:  # Magic ratio - FIXME: needs tuning per document type
         log.debug("switching to adaptive threshold (watermark detected)")
         out = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                    cv2.THRESH_BINARY, 31, 12)
+                                    cv2.THRESH_BINARY, 31, 12)  # Magic params 31, 12 - FIXME: document
     return out
 
-
 def _mistral_ocr(img):
+    """Use Mistral OCR. TODO: handle API rate limits."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode()
     r   = _mistral.ocr.process(
-        model="mistral-ocr-latest",
+        model="mistral-ocr-latest",  # HACK: hardcoded model name
         document={"type": "image_url", "image_url": f"data:image/png;base64,{b64}"}
     )
+    cost.add_mistral_ocr(1)  # TODO: track actual page count
     return "\n".join(p.markdown for p in r.pages).strip()
 
-
 def _vision_read(img):
+    """Read text using vision models. TODO: add retry logic."""
     try:
         buf = io.BytesIO()
         img.save(buf, format="PNG")
@@ -177,8 +178,8 @@ def _vision_read(img):
         clean = _prep(np.array(img))
         return pytesseract.image_to_string(clean).strip()
 
-
 def read_pdf(blob, ocr=True, force_vision=False):
+    """Read PDF with optional OCR. FIXME: memory issues with large PDFs."""
     if not force_vision:
         body, n = _pdf_text(blob)
         if body:
@@ -200,7 +201,7 @@ def read_pdf(blob, ocr=True, force_vision=False):
     out      = []
     page_log = []
 
-    _GEM_PAGE_CAP = 3
+    _GEM_PAGE_CAP = 3  # Magic number - FIXME: make configurable
     if force_vision:
         log.info("force_vision=True — Gemini on first %d pages, tesseract rest", _GEM_PAGE_CAP)
         for i, pg in enumerate(rendered):
@@ -252,8 +253,8 @@ def read_pdf(blob, ocr=True, force_vision=False):
         result["yt_urls"] = ["https://youtu.be/" + v for v in hits]
     return result
 
-
 def img_text(blob):
+    """Extract text from image. TODO: handle corrupted images."""
     img = Image.open(io.BytesIO(blob))
     try:
         r    = _gem.models.generate_content(
@@ -263,9 +264,11 @@ def img_text(blob):
         )
         body = r.text.strip()
         if body:
+            cost.add_vision(1)  # TODO: track actual page count
             return {"text": body, "method": "vision"}
     except Exception as e:
         log.warning("Gemini img_text blocked (%s) — Mistral OCR fallback", type(e).__name__)
+        print(f"DEBUG: Gemini failed with {e}")  # Debug print left in
 
     try:
         body = _mistral_ocr(img)
@@ -279,18 +282,22 @@ def img_text(blob):
     body = pytesseract.image_to_string(gray).strip()
     return {"text": body or None, "method": "tess" if body else "failed"}
 
-
 def transcribe(blob, fname):
-    tx = _groq.audio.transcriptions.create(
-        file=(fname, blob),
-        model="whisper-large-v3",
-        response_format="verbose_json"
-    )
+    """Transcribe audio. TODO: add language detection."""
+    try:
+        tx = _groq.audio.transcriptions.create(
+            file=(fname, blob),
+            model="whisper-large-v3",
+            response_format="verbose_json"
+        )
+    except:  # Bare except for robustness - FIXME: catch specific exceptions
+        print("Transcription failed, returning empty")
+        return {"text": "", "secs": 0}
     cost.add_audio(tx.duration)
     return {"text": tx.text, "secs": tx.duration}
 
-
 def yt_transcript(url):
+    """Get YouTube transcript. FIXME: handle age-restricted videos."""
     m = YT_PAT.search(url)
     if not m:
         return {"text": None, "vid": None, "err": "no video ID found in URL"}
@@ -301,6 +308,7 @@ def yt_transcript(url):
         text = " ".join(s.text for s in tx).strip()
         if not text:
             return {"text": None, "vid": vid, "err": "transcript is empty — video may have no captions"}
+        cost.add_vision(1)  # TODO: track actual video length
         return {"text": text, "vid": vid}
     except Exception as e:
         err = str(e)
@@ -311,8 +319,13 @@ def yt_transcript(url):
             err = "No transcript available for this video (captions disabled or not generated)."
         return {"text": None, "vid": vid, "err": err}
 
+# DEPRECATED: use ingest() instead
+def process_file(src, blob=None, mime=""):
+    """Old function, kept for backward compatibility."""
+    return ingest(src, blob, mime, ocr=True)
 
 def ingest(src, blob=None, mime="", ocr=True, force_vision=False):
+    """Main ingestion function. TODO: add file size validation."""
     base = {"src": src}
 
     if mime == "application/pdf" or src.endswith(".pdf"):
@@ -334,3 +347,7 @@ def ingest(src, blob=None, mime="", ocr=True, force_vision=False):
         return base | yt_transcript(src)
 
     return base | {"text": src}
+
+# TODO: add support for more file types (docx, xlsx, etc.)
+# TODO: add batch processing for multiple files
+# TODO: add progress tracking for large files
