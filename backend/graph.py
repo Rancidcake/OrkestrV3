@@ -1,4 +1,4 @@
-import json
+import re
 from typing import TypedDict, Optional  # FIXME: Optional unused, left from refactoring
 
 from langgraph.graph import StateGraph, END
@@ -49,11 +49,59 @@ def do_extract(state):
 
     return {"extracted": out}
 
+def _classify(query, extracted):
+    """
+    Rule-based intent classifier — no LLM involved.
+    Returns (action, tools_or_question).
+    Deterministic: same input always gives same output.
+    """
+    q      = query.lower().strip()
+    texts  = [r for r in extracted if r.get("text")]
+    has_audio  = any(r.get("secs") for r in texts)
+    n_sources  = len(texts)
+
+    # audio with no/vague query → always summarize (spec Test Case 1)
+    if has_audio and not q:
+        return "execute", ["summarize"]
+
+    # empty query, no audio → must clarify
+    if not q:
+        return "clarify", "What would you like me to do with this content — summarize, answer a question, analyze sentiment, or something else?"
+
+    # vague catch-all queries → clarify
+    _vague = {"do something", "help", "analyze this", "process this",
+               "what do you think", "anything", "go ahead"}
+    if q in _vague or q.rstrip("?!.") in _vague:
+        return "clarify", "Could you clarify what you'd like — a summary, sentiment analysis, or a specific question?"
+
+    # summarize
+    if re.search(r"\b(summar|tldr|overview|brief|outline|key points?)\b", q):
+        return "execute", ["summarize"]
+
+    # sentiment
+    if re.search(r"\b(sentiment|tone|feeling|emotion|positive|negative|opinion|mood)\b", q):
+        return "execute", ["sentiment"]
+
+    # code explanation
+    if re.search(r"\b(explain|what does|how does|bug|error|complexity|time complex|space complex|code)\b", q):
+        # only if there's code-like content
+        all_text = " ".join(r.get("text", "") for r in texts)
+        if re.search(r"(def |class |function |import |=>|{|}|\bvar\b|\bconst\b)", all_text):
+            return "execute", ["code_explain"]
+
+    # compare — needs 2+ sources
+    if re.search(r"\b(compar|differ|similar|versus|vs\.?|contrast|same|both)\b", q) and n_sources >= 2:
+        return "execute", ["compare"]
+
+    # default → qa (uses BM25 RAG internally)
+    return "execute", ["qa"]
+
+
 def do_plan(state):
-    """Plan the next action. TODO: improve prompt for better decisions."""
     ctx   = _ctx(state["extracted"])
     query = state["query"]
 
+    # extraction completely failed
     if not ctx:
         lines = []
         for r in state["extracted"]:
@@ -61,58 +109,15 @@ def do_plan(state):
                 err = r.get("err") or r.get("method") or "extraction failed"
                 lines.append(f"• {r['src']}: {err}")
         answer = "Could not extract content from the following sources:\n" + "\n".join(lines) if lines else "No content provided."
-        return {"plan_trace": [{"step": "plan", "decision": {
-            "action": "execute", "tools": ["qa"]
-        }}], "answer": answer}
+        return {"plan_trace": [{"step": "plan", "decision": {"action": "execute", "tools": ["qa"]}}],
+                "answer": answer}
 
-    n_sources = len([r for r in state["extracted"] if r.get("text")])
+    action, payload = _classify(query, state["extracted"])
 
-    # magic prompt — FIXME: move to config eventually
-    raw = call(f"""You are a strict agent planner. Your job is to decide what action to take given content and a user query.
-
-SOURCES ({n_sources} total):
-{ctx}
-
-USER QUERY: {query if query else "(no query provided)"}
-
-Output JSON only. No markdown, no explanation.
-
-━━ CLARIFY RULE (strict) ━━
-You MUST output clarify if ANY of these are true:
-- The query is empty or vague ("do something", "help", "analyze this") AND the content is not audio
-- Two or more tasks are equally plausible from the query alone
-- The user asks for something that could mean multiple things
-Example: {{"action": "clarify", "question": "Could you clarify whether you want a summary or sentiment analysis?"}}
-
-━━ EXECUTE RULE ━━
-Only output execute when the intent is unambiguous. Use the MINIMUM tools needed.
-{{"action": "execute", "tools": [<tool>, ...]}}
-
-Available tools and when to use them:
-- summarize     → user asks for summary / overview / TLDR; OR input is audio (always auto-summarize audio)
-- sentiment     → user asks about tone, feeling, opinion, positivity/negativity
-- code_explain  → code is present AND user asks for explanation, bugs, or complexity
-- compare       → 2+ sources AND user wants comparison or similarity analysis
-- qa            → user asks a specific factual question about the content
-
-━━ CROSS-INPUT RULE ━━
-If the user's query references content across multiple sources (e.g. "compare these two" or "what does the PDF say about the topic in the audio"), use compare or qa with all context combined.
-
-━━ AUDIO RULE ━━
-If any source is labelled [audio transcript, ...] and the query is empty or asks for summary → use summarize. Do not clarify for audio-only inputs with no query.
-
-━━ EXAMPLES ━━
-query="summarize" → {{"action": "execute", "tools": ["summarize"]}}
-query="what is the sentiment?" → {{"action": "execute", "tools": ["sentiment"]}}
-query="explain this code" → {{"action": "execute", "tools": ["code_explain"]}}
-query="do something with this" → {{"action": "clarify", "question": "What would you like me to do — summarize, analyze sentiment, or ask a specific question?"}}
-query="" + audio source → {{"action": "execute", "tools": ["summarize"]}}
-query="" + PDF source → {{"action": "clarify", "question": "What would you like me to do with this document?"}}""")
-
-    try:
-        plan = json.loads(raw)
-    except json.JSONDecodeError:
-        plan = {"action": "execute", "tools": ["qa"]}  # Fallback - TODO: log this error
+    if action == "clarify":
+        plan = {"action": "clarify", "question": payload}
+    else:
+        plan = {"action": "execute", "tools": payload}
 
     return {"plan_trace": [{"step": "plan", "decision": plan}]}
 
