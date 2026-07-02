@@ -6,11 +6,11 @@ from .llm import call
 _SUMM_CAP = 4000
 _SENT_CAP = 2000
 _CODE_CAP = 3000
-_CHUNK_SZ = 400   # words per chunk — tuned for llama context window
-_TOP_K    = 4     # chunks to retrieve — more than 4 gets noisy
+_CHUNK_SZ = 400   # words per chunk
+_TOP_K    = 4     # chunks to retrieve
 
 
-# ── BM25 retrieval (pure Python, no deps) ─────────────────────────────────────
+# ── BM25 (pure Python) ────────────────────────────────────────────────────────
 
 def _chunk(text, size=_CHUNK_SZ):
     words = text.split()
@@ -18,37 +18,29 @@ def _chunk(text, size=_CHUNK_SZ):
         return []
     return [" ".join(words[i:i+size]) for i in range(0, len(words), size)]
 
-def _bm25(query, chunks, k=_TOP_K):
-    """BM25 ranking — retrieves most relevant chunks for a query."""
+
+def _bm25_rank(query, chunks):
+    """Returns (score, index) sorted best-first."""
     if not chunks:
         return []
-    if len(chunks) <= k:
-        return chunks
-
     K1, B = 1.5, 0.75
-    q_terms  = query.lower().split()
-    avg_dl   = sum(len(c.split()) for c in chunks) / len(chunks)
-    scores   = []
-
+    q_terms = query.lower().split()
+    avg_dl  = sum(len(c.split()) for c in chunks) / len(chunks)
+    scores  = []
     for i, chunk in enumerate(chunks):
-        words  = chunk.lower().split()
-        tf     = Counter(words)
-        dl     = len(words)
-        score  = 0.0
+        words = chunk.lower().split()
+        tf    = Counter(words)
+        dl    = len(words)
+        score = 0.0
         for t in q_terms:
-            n_containing = sum(1 for c in chunks if t in c.lower())
-            if n_containing == 0:
+            n_hit = sum(1 for c in chunks if t in c.lower())
+            if n_hit == 0:
                 continue
-            idf = math.log((len(chunks) - n_containing + 0.5) /
-                           (n_containing + 0.5) + 1.0)
-            freq = tf.get(t, 0)
+            idf   = math.log((len(chunks) - n_hit + 0.5) / (n_hit + 0.5) + 1.0)
+            freq  = tf.get(t, 0)
             score += idf * (freq * (K1 + 1)) / (freq + K1 * (1 - B + B * dl / avg_dl))
         scores.append((score, i))
-
-    top = sorted(scores, reverse=True)[:k]
-    # keep document order for readability — HACK: re-sort by index
-    top = sorted(top, key=lambda x: x[1])
-    return [chunks[i] for _, i in top]
+    return sorted(scores, reverse=True)
 
 
 # ── tools ─────────────────────────────────────────────────────────────────────
@@ -107,32 +99,52 @@ Do they discuss the same topic? What are the key similarities and differences?
 Give a clear comparative analysis.""")
 
 
-def qa(question, ctx=""):
-    if not ctx:
-        return call(question)
+def qa(question, sources=None):
+    """
+    RAG-based QA.
+    sources: list of {"src": filename, "text": content}
+    Returns (answer_str, retrieve_log) where retrieve_log has BM25 metadata.
+    """
+    if not sources:
+        return call(question), []
 
-    # RAG: chunk → BM25 retrieve → answer on relevant chunks only
-    chunks    = _chunk(ctx)
-    retrieved = _bm25(question, chunks, k=_TOP_K)
-    context   = "\n\n---\n\n".join(retrieved)
+    # build flat chunk list tagged by source
+    tagged = []
+    for s in sources:
+        for chunk in _chunk(s["text"]):
+            tagged.append({"src": s["src"], "chunk": chunk})
 
-    return call(
+    if not tagged:
+        return call(question), []
+
+    # BM25 over all chunks regardless of source
+    all_chunks = [t["chunk"] for t in tagged]
+    ranked     = _bm25_rank(question, all_chunks)
+    top_idx    = [i for _, i in ranked[:_TOP_K] if ranked[0][0] > 0]
+    if not top_idx:
+        top_idx = list(range(min(_TOP_K, len(tagged))))
+
+    # restore document order for readability
+    top_idx  = sorted(top_idx)
+    selected = [tagged[i] for i in top_idx]
+
+    # build cited context block
+    context_parts = [f'[Source: {c["src"]}]\n{c["chunk"]}' for c in selected]
+    context       = "\n\n---\n\n".join(context_parts)
+
+    retrieve_log = [{"src": c["src"], "chunk_idx": i}
+                    for i, c in zip(top_idx, selected)]
+
+    answer = call(
         f"Answer the question using only the retrieved content below.\n"
-        f"If the answer is not in the content, say so.\n\n"
-        f"Content:\n{context}\n\n"
+        f"Cite your sources inline using [Source: filename] where relevant.\n"
+        f"If the answer is not in the content, say so explicitly.\n\n"
+        f"Retrieved content:\n{context}\n\n"
         f"Question: {question}"
     )
+    return answer, retrieve_log
 
 
-# DEPRECATED: too verbose, replaced by qa() — keeping for backward compat
+# DEPRECATED: use qa() instead
 def _qa_verbose(q, ctx=""):
-    prompt = f"""You are a helpful assistant. Use the context below to answer.
-If the answer isn't in the context, say so clearly.
-
-Context:
-{ctx[:2000]}
-
-Question: {q}
-
-Answer:"""
-    return call(prompt)
+    return call(f"Context:\n{ctx[:2000]}\n\nQuestion: {q}")

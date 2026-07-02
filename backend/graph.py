@@ -7,14 +7,15 @@ from .extract import ingest, YT_PAT
 from . import tools
 from .llm import call
 
+
 class S(TypedDict):
-    """State container. TODO: add more fields for better tracking."""
     inputs:       list
     query:        str
     extracted:    list
     plan_trace:   list
     clarifying_q: str | None
     answer:       str | None
+
 
 def _ctx(extracted):
     parts = []
@@ -23,144 +24,186 @@ def _ctx(extracted):
             label = r["src"]
             if r.get("secs"):
                 m, s = divmod(int(r["secs"]), 60)
-                label += f" [audio transcript, {m}m{s}s]"
+                label += f" [audio, {m}m{s}s]"
             elif r.get("how") == "ocr":
-                conf  = f", OCR confidence {r['confidence']}%" if r.get("confidence") else ""
+                conf   = f", conf {r['confidence']}%" if r.get("confidence") else ""
                 label += f" [scanned PDF{conf}]"
             elif r.get("method") in ("vision", "mistral-ocr", "tess"):
-                label += f" [image, method={r['method']}]"
+                label += f" [image/{r['method']}]"
             elif r.get("vid"):
-                label += " [youtube transcript]"
+                label += " [youtube]"
             parts.append(f"[{label}]\n{r['text'][:1200]}")
     return "\n\n".join(parts)
 
+
 def do_extract(state):
-    """Extract text from all inputs. TODO: handle errors gracefully."""
-    out = []
+    out    = list(state.get("extracted", []))   # preserve pre-populated (used in tests)
+    events = []
+
     for inp in state["inputs"]:
         r = ingest(inp["src"], inp.get("blob"), inp.get("mime", ""),
                    force_vision=inp.get("force_vision", False))
         out.append(r)
+
+        method = r.get("how") or r.get("method") or ("audio" if r.get("secs") else "text")
+        events.append({
+            "step":   "extract",
+            "src":    r["src"],
+            "method": method,
+            "chars":  len(r.get("text") or ""),
+            "ok":     bool(r.get("text")),
+            "err":    r.get("err"),
+        })
+
+        # follow YouTube URLs embedded inside PDFs
         for url in r.get("yt_urls", []):
-            out.append(ingest(url))
+            yt = ingest(url)
+            out.append(yt)
+            events.append({
+                "step":   "extract",
+                "src":    url,
+                "method": "youtube",
+                "chars":  len(yt.get("text") or ""),
+                "ok":     bool(yt.get("text")),
+            })
 
+    # YouTube URLs in the query text
     for vid in YT_PAT.findall(state.get("query", "")):
-        out.append(ingest("https://youtu.be/" + vid))
+        url = "https://youtu.be/" + vid
+        yt  = ingest(url)
+        out.append(yt)
+        events.append({
+            "step":   "extract",
+            "src":    url,
+            "method": "youtube",
+            "chars":  len(yt.get("text") or ""),
+            "ok":     bool(yt.get("text")),
+        })
 
-    return {"extracted": out}
+    return {"extracted": out, "plan_trace": events}
+
 
 def _classify(query, extracted):
     """
-    Rule-based intent classifier — no LLM involved.
-    Returns (action, tools_or_question).
-    Deterministic: same input always gives same output.
+    Rule-based intent classifier — zero LLM calls.
+    Deterministic: same inputs always produce same output.
+    Returns (action, tools_list | clarify_question).
     """
-    q      = query.lower().strip()
-    texts  = [r for r in extracted if r.get("text")]
-    has_audio  = any(r.get("secs") for r in texts)
-    n_sources  = len(texts)
+    q         = query.lower().strip()
+    texts     = [r for r in extracted if r.get("text")]
+    has_audio = any(r.get("secs") for r in texts)
+    n_sources = len(texts)
 
-    # audio with no/vague query → always summarize (spec Test Case 1)
     if has_audio and not q:
         return "execute", ["summarize"]
 
-    # empty query, no audio → must clarify
     if not q:
-        return "clarify", "What would you like me to do with this content — summarize, answer a question, analyze sentiment, or something else?"
+        return "clarify", "What would you like me to do — summarize, ask a question, analyze sentiment, or explain code?"
 
-    # vague catch-all queries → clarify
     _vague = {"do something", "help", "analyze this", "process this",
                "what do you think", "anything", "go ahead"}
     if q in _vague or q.rstrip("?!.") in _vague:
-        return "clarify", "Could you clarify what you'd like — a summary, sentiment analysis, or a specific question?"
+        return "clarify", "Could you clarify — summary, sentiment analysis, or a specific question?"
 
-    # summarize
     if re.search(r"\b(summar|tldr|overview|brief|outline|key points?)\b", q):
         return "execute", ["summarize"]
 
-    # sentiment
     if re.search(r"\b(sentiment|tone|feeling|emotion|positive|negative|opinion|mood)\b", q):
         return "execute", ["sentiment"]
 
-    # code explanation
-    if re.search(r"\b(explain|what does|how does|bug|error|complexity|time complex|space complex|code)\b", q):
-        # only if there's code-like content
+    if re.search(r"\b(explain|what does|how does|bug|error|complexity|time complex|space complex)\b", q):
         all_text = " ".join(r.get("text", "") for r in texts)
-        if re.search(r"(def |class |function |import |=>|{|}|\bvar\b|\bconst\b)", all_text):
+        if re.search(r"(def |class |function |import |=>|\bvar\b|\bconst\b|=>|{)", all_text):
             return "execute", ["code_explain"]
 
-    # compare — needs 2+ sources
-    if re.search(r"\b(compar|differ|similar|versus|vs\.?|contrast|same|both)\b", q) and n_sources >= 2:
+    if re.search(r"\b(compar|differ|similar|versus|vs\.?|contrast|same topic|both)\b", q) and n_sources >= 2:
         return "execute", ["compare"]
 
-    # default → qa (uses BM25 RAG internally)
     return "execute", ["qa"]
 
 
 def do_plan(state):
     ctx   = _ctx(state["extracted"])
     query = state["query"]
+    trace = list(state["plan_trace"])   # carry forward extraction events
 
-    # extraction completely failed
     if not ctx:
-        lines = []
-        for r in state["extracted"]:
-            if not r.get("text"):
-                err = r.get("err") or r.get("method") or "extraction failed"
-                lines.append(f"• {r['src']}: {err}")
-        answer = "Could not extract content from the following sources:\n" + "\n".join(lines) if lines else "No content provided."
-        return {"plan_trace": [{"step": "plan", "decision": {"action": "execute", "tools": ["qa"]}}],
-                "answer": answer}
+        if query:
+            # pure conversational QA — no files, just a question
+            trace.append({"step": "plan", "action": "execute", "tools": ["qa"]})
+            return {"plan_trace": trace}
+        lines  = [f"• {r['src']}: {r.get('err') or 'extraction failed'}"
+                  for r in state["extracted"] if not r.get("text")]
+        answer = "Could not extract content:\n" + "\n".join(lines) if lines else "No content provided."
+        trace.append({"step": "plan", "action": "error"})
+        return {"plan_trace": trace, "answer": answer}
 
     action, payload = _classify(query, state["extracted"])
+    trace.append({"step": "plan", "action": action,
+                  "tools": payload if action == "execute" else None,
+                  "question": payload if action == "clarify" else None})
+    return {"plan_trace": trace}
 
-    if action == "clarify":
-        plan = {"action": "clarify", "question": payload}
-    else:
-        plan = {"action": "execute", "tools": payload}
-
-    return {"plan_trace": [{"step": "plan", "decision": plan}]}
 
 def _route(state):
-    """Route to next node. TODO: add more routing logic."""
     if state.get("answer"):
         return "synthesize"
-    plan = state["plan_trace"][-1]["decision"]
-    return "clarify" if plan.get("action") == "clarify" else "execute"
+    last = next((t for t in reversed(state["plan_trace"]) if t["step"] == "plan"), {})
+    return "clarify" if last.get("action") == "clarify" else "execute"
+
 
 def do_clarify(state):
-    """Generate clarification question. TODO: make questions more specific."""
-    q = state["plan_trace"][-1]["decision"].get("question",
-        "Could you clarify what you'd like me to do?")
+    last = next((t for t in reversed(state["plan_trace"]) if t["step"] == "plan"), {})
+    q    = last.get("question", "Could you clarify what you'd like me to do?")
     return {"clarifying_q": q}
 
+
 def do_execute(state):
-    """Execute the planned tools. FIXME: handle tool errors."""
-    plan      = state["plan_trace"][-1]["decision"]
-    tool_list = plan.get("tools", ["qa"])
+    last      = next(t for t in reversed(state["plan_trace"]) if t["step"] == "plan")
+    tool_list = last.get("tools", ["qa"])
     query     = state["query"]
     trace     = list(state["plan_trace"])
 
-    texts    = [r["text"] for r in state["extracted"] if r.get("text")]
-    all_text = "\n\n".join(texts)
+    srcs     = [{"src": r["src"], "text": r["text"]}
+                for r in state["extracted"] if r.get("text")]
+    all_text = "\n\n".join(s["text"] for s in srcs)
+    texts    = [s["text"] for s in srcs]
 
     parts = []
     for t in tool_list:
         if t == "summarize":
             out = tools.summarize(all_text)
+            trace.append({"step": "tool", "tool": "summarize",
+                          "sources": [s["src"] for s in srcs]})
+
         elif t == "sentiment":
             out = tools.sentiment(all_text)
+            trace.append({"step": "tool", "tool": "sentiment",
+                          "sources": [s["src"] for s in srcs]})
+
         elif t == "code_explain":
             out = tools.code_explain(all_text)
+            trace.append({"step": "tool", "tool": "code_explain",
+                          "sources": [s["src"] for s in srcs]})
+
         elif t == "compare" and len(texts) >= 2:
             out = tools.compare(texts[0], texts[1])
+            trace.append({"step": "tool", "tool": "compare",
+                          "sources": [srcs[0]["src"], srcs[1]["src"]]})
+
         else:
-            out = tools.qa(query, all_text)
+            answer, retrieve_log = tools.qa(query, sources=srcs)
+            out = answer
+            # log BM25 retrieval separately
+            trace.append({"step": "retrieve", "tool": "BM25",
+                          "chunks": len(retrieve_log),
+                          "sources": list({r["src"] for r in retrieve_log})})
+            trace.append({"step": "tool", "tool": "qa",
+                          "sources": [s["src"] for s in srcs]})
 
         parts.append(out)
-        trace.append({"step": "tool", "tool": t})
 
-    # append audio duration if present — spec requires it in Test Case 1
+    # audio duration footer
     for r in state["extracted"]:
         if r.get("secs"):
             m, s = divmod(int(r["secs"]), 60)
@@ -169,18 +212,17 @@ def do_execute(state):
 
     return {"plan_trace": trace, "answer": "\n\n".join(parts)}
 
+
 def do_synthesize(state):
-    """Synthesize final answer. TODO: improve synthesis logic."""
-    # answer already set by execute — pass through for now
     return state
+
 
 # DEPRECATED: use _build() instead
 def build_graph():
-    """Old function, kept for backward compatibility."""
     return _build()
 
+
 def _build():
-    """Build the state graph. TODO: add error handling for graph compilation."""
     g = StateGraph(S)
     g.add_node("extract",    do_extract)
     g.add_node("plan",       do_plan)
@@ -193,7 +235,7 @@ def _build():
     g.add_conditional_edges("plan", _route, {
         "clarify":    "clarify",
         "execute":    "execute",
-        "synthesize": "synthesize"
+        "synthesize": "synthesize",
     })
     g.add_edge("clarify",    END)
     g.add_edge("execute",    "synthesize")
@@ -201,4 +243,5 @@ def _build():
 
     return g.compile()
 
-graph = _build()  # TODO: make this lazy-loaded
+
+graph = _build()

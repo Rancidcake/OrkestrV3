@@ -56,15 +56,24 @@ def test_compare_returns_analysis():
     assert len(out) > 50  # Magic number - FIXME: document this threshold
 
 def test_qa_no_context():
-    """Test QA without context."""
-    out = qa("What is 2 + 2?")
+    """Test QA without context — returns (answer, log) tuple."""
+    out, log = qa("What is 2 + 2?")
     assert "4" in out
+    assert isinstance(log, list)
 
-def test_qa_with_context():
-    """Test QA with context. TODO: improve assertion logic."""
-    ctx = "The meeting was held on Monday. Action items: fix the login bug, deploy by Friday."
-    out = qa("What are the action items?", ctx)
+def test_qa_with_sources():
+    """Test QA with source list — BM25 retrieval + citation."""
+    sources = [{"src": "meeting.txt",
+                "text": "The meeting was held on Monday. Action items: fix the login bug, deploy by Friday."}]
+    out, log = qa("What are the action items?", sources=sources)
     assert "login" in out.lower() or "deploy" in out.lower()
+
+def test_qa_retrieve_log():
+    """Test that retrieve log contains source info. TODO: check chunk count."""
+    sources = [{"src": "doc.txt", "text": "Python is great for data science. " * 50}]
+    out, log = qa("What is Python good for?", sources=sources)
+    assert len(log) > 0
+    assert all("src" in r for r in log)
 
 # DEPRECATED: use test_summarize_nonempty instead
 def test_summarize_length():

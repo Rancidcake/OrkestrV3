@@ -27,20 +27,76 @@ function badgeClass(how, method) {
   return "bg-stone-100 text-stone-500 border border-stone-200"
 }
 
+const STEP_ICON = { extract: "📄", plan: "🧠", retrieve: "🔍", tool: "🔧", error: "❌" }
+const METHOD_COLOR = {
+  native: "text-emerald-600", ocr: "text-amber-600", vision: "text-blue-600",
+  "mistral-ocr": "text-violet-600", audio: "text-pink-600", youtube: "text-red-600",
+  tess: "text-stone-500",
+}
+
 function PlanTrace({ trace }) {
-  const steps = trace.filter(t => t.step === "tool")
-  if (!steps.length) return null
+  const [open, setOpen] = useState(false)
+  if (!trace || !trace.length) return null
+
+  // summary line — just tools used
+  const toolSteps = trace.filter(t => t.step === "tool")
+  const summary   = toolSteps.map(t => t.tool).join(" → ") || "processing"
+
   return (
-    <div className="flex items-center gap-1.5 flex-wrap mt-2 px-1">
-      <span className="text-[11px] text-stone-400 font-medium uppercase tracking-wide">tools</span>
-      {steps.map((t, i) => (
-        <span key={i} className="flex items-center gap-1">
-          <span className="px-2 py-0.5 bg-red-50 border border-red-200 rounded-full text-[11px] text-red-600 font-mono">
-            {t.tool}
-          </span>
-          {i < steps.length - 1 && <span className="text-stone-300 text-xs">→</span>}
-        </span>
-      ))}
+    <div className="mt-1.5 px-1">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-[11px] text-stone-400 hover:text-stone-600 transition-colors"
+      >
+        <span>{open ? "▾" : "▸"}</span>
+        <span className="font-mono text-red-500">{summary}</span>
+        <span className="text-stone-300">· {trace.length} steps</span>
+      </button>
+
+      {open && (
+        <div className="mt-1.5 space-y-1 border-l-2 border-stone-100 pl-3">
+          {trace.map((t, i) => (
+            <div key={i} className="flex items-start gap-2 text-[11px]">
+              <span className="shrink-0 mt-0.5">{STEP_ICON[t.step] ?? "·"}</span>
+              <div className="min-w-0">
+                {t.step === "extract" && (
+                  <span>
+                    <span className={`font-mono ${METHOD_COLOR[t.method] ?? "text-stone-500"}`}>{t.method}</span>
+                    <span className="text-stone-400"> · {t.src}</span>
+                    {t.ok
+                      ? <span className="text-stone-400"> · {t.chars} chars</span>
+                      : <span className="text-red-400"> · {t.err ?? "failed"}</span>
+                    }
+                  </span>
+                )}
+                {t.step === "plan" && (
+                  <span className="text-stone-500">
+                    classified as <span className="font-mono text-stone-700">{t.action}</span>
+                    {t.tools && <span className="text-stone-400"> → [{t.tools.join(", ")}]</span>}
+                    {t.question && <span className="text-stone-400"> → clarify</span>}
+                  </span>
+                )}
+                {t.step === "retrieve" && (
+                  <span className="text-stone-500">
+                    BM25 retrieved <span className="font-mono text-stone-700">{t.chunks} chunks</span>
+                    {t.sources?.length > 0 && (
+                      <span className="text-stone-400"> from [{t.sources.join(", ")}]</span>
+                    )}
+                  </span>
+                )}
+                {t.step === "tool" && (
+                  <span>
+                    <span className="font-mono text-red-600">{t.tool}</span>
+                    {t.sources?.length > 0 && (
+                      <span className="text-stone-400"> · [{t.sources.join(", ")}]</span>
+                    )}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
