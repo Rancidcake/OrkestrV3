@@ -1,0 +1,18 @@
+# secrets
+.env
+.env.local
+*.env
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# node
+frontend/node_modules/
+frontend/.next/
+
+# misc
+.DS_Store
+yes.txt
