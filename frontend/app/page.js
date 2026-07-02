@@ -6,24 +6,17 @@ import { Send, Paperclip, X, ChevronDown, ChevronRight } from "lucide-react"
 // backend calls go through Next.js rewrites — no cross-origin issues
 const API = process.env.NEXT_PUBLIC_API_URL ?? ""
 
-type UploadedFile = { name: string; mime: string; data: string }
-
-type Message =
-  | { role: "user";  text: string; files: string[] }
-  | { role: "agent"; extracted: any[]; plan_trace: any[]; clarifying_q: string | null; answer: string | null }
-  | { role: "error"; text: string }
-
-function toBase64(file: File): Promise<string> {
+function toBase64(file) {
   return new Promise((res, rej) => {
     const r = new FileReader()
-    r.onload  = () => res((r.result as string).split(",")[1])
+    r.onload  = () => res(r.result.split(",")[1])
     r.onerror = rej
     r.readAsDataURL(file)
   })
 }
 
 // FIXME: these colors were picked by eye, may need design review
-const badgeClass = (how?: string, method?: string) => {
+function badgeClass(how, method) {
   const v = how ?? method ?? ""
   if (v === "native")      return "bg-emerald-50 text-emerald-700 border border-emerald-200"
   if (v === "ocr")         return "bg-amber-50 text-amber-700 border border-amber-200"
@@ -34,7 +27,7 @@ const badgeClass = (how?: string, method?: string) => {
   return "bg-stone-100 text-stone-500 border border-stone-200"
 }
 
-function PlanTrace({ trace }: { trace: any[] }) {
+function PlanTrace({ trace }) {
   const steps = trace.filter(t => t.step === "tool")
   if (!steps.length) return null
   return (
@@ -52,7 +45,7 @@ function PlanTrace({ trace }: { trace: any[] }) {
   )
 }
 
-function Extracted({ items }: { items: any[] }) {
+function Extracted({ items }) {
   const [open, setOpen] = useState(false)
   if (!items.length) return null
 
@@ -87,12 +80,8 @@ function Extracted({ items }: { items: any[] }) {
                   <span className="text-[10px] text-stone-400">{r.pages}p</span>
                 )}
               </div>
-              {r.text && (
-                <p className="text-[11px] text-stone-400 line-clamp-3 leading-relaxed">{r.text}</p>
-              )}
-              {r.err && (
-                <p className="text-[11px] text-red-400">{r.err}</p>
-              )}
+              {r.text && <p className="text-[11px] text-stone-400 line-clamp-3 leading-relaxed">{r.text}</p>}
+              {r.err  && <p className="text-[11px] text-red-400">{r.err}</p>}
             </div>
           ))}
         </div>
@@ -101,7 +90,7 @@ function Extracted({ items }: { items: any[] }) {
   )
 }
 
-function AgentBubble({ msg }: { msg: Extract<Message, { role: "agent" }> }) {
+function AgentBubble({ msg }) {
   return (
     <div className="flex flex-col gap-0.5 max-w-[82%]">
       <Extracted items={msg.extracted} />
@@ -122,19 +111,19 @@ const HINTS = [
 ]
 
 export default function Home() {
-  const [messages, setMessages]       = useState<Message[]>([])
+  const [messages, setMessages]       = useState([])
   const [text, setText]               = useState("")
-  const [files, setFiles]             = useState<UploadedFile[]>([])
+  const [files, setFiles]             = useState([])
   const [loading, setLoading]         = useState(false)
   const [forceVision, setForceVision] = useState(false)
-  const fileRef                       = useRef<HTMLInputElement>(null)
-  const bottomRef                     = useRef<HTMLDivElement>(null)
+  const fileRef                       = useRef(null)
+  const bottomRef                     = useRef(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages, loading])
 
-  async function pickFiles(e: React.ChangeEvent<HTMLInputElement>) {
+  async function pickFiles(e) {
     const picked  = Array.from(e.target.files ?? [])
     const encoded = await Promise.all(picked.map(async f => ({
       name: f.name,
@@ -149,7 +138,7 @@ export default function Home() {
     if (!text.trim() && !files.length) return
     setLoading(true)
 
-    const userMsg: Message = { role: "user", text, files: files.map(f => f.name) }
+    const userMsg = { role: "user", text, files: files.map(f => f.name) }
     setMessages(prev => [...prev, userMsg])
 
     try {
@@ -161,7 +150,7 @@ export default function Home() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail ?? "request failed")
       setMessages(prev => [...prev, { role: "agent", ...data }])
-    } catch (err: any) {
+    } catch (err) {
       setMessages(prev => [...prev, { role: "error", text: err.message }])
     }
 
@@ -171,7 +160,7 @@ export default function Home() {
     setLoading(false)
   }
 
-  function onKey(e: React.KeyboardEvent) {
+  function onKey(e) {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send() }
   }
 
@@ -194,7 +183,6 @@ export default function Home() {
       {/* messages */}
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-5">
 
-        {/* empty state */}
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full pb-10 text-center space-y-4">
             <div className="w-14 h-14 bg-red-500 rounded-2xl flex items-center justify-center shadow-md">
@@ -206,10 +194,7 @@ export default function Home() {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2 max-w-md w-full">
               {HINTS.map((h, i) => (
-                <div
-                  key={i}
-                  className="text-left text-xs text-stone-500 bg-white border border-stone-200 rounded-xl px-3 py-2.5 leading-relaxed"
-                >
+                <div key={i} className="text-left text-xs text-stone-500 bg-white border border-stone-200 rounded-xl px-3 py-2.5 leading-relaxed">
                   {h}
                 </div>
               ))}
@@ -247,7 +232,6 @@ export default function Home() {
           </div>
         ))}
 
-        {/* loading */}
         {loading && (
           <div className="flex justify-start">
             <div className="bg-white border border-stone-200 rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm flex items-center gap-1">
@@ -268,14 +252,10 @@ export default function Home() {
       {/* input area */}
       <div className="bg-white border-t border-stone-200 px-4 pt-3 pb-4 space-y-2">
 
-        {/* file chips */}
         {files.length > 0 && (
           <div className="flex gap-2 flex-wrap">
             {files.map((f, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-1.5 bg-stone-50 border border-stone-200 rounded-full px-3 py-1 text-xs text-stone-600"
-              >
+              <div key={i} className="flex items-center gap-1.5 bg-stone-50 border border-stone-200 rounded-full px-3 py-1 text-xs text-stone-600">
                 <span className="max-w-[140px] truncate">{f.name}</span>
                 <button
                   onClick={() => setFiles(prev => prev.filter((_, j) => j !== i))}
@@ -288,7 +268,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* ocr-disabled toggle — only shows when pdf is attached */}
         {hasPdf && (
           <label className="flex items-center gap-2 text-xs text-stone-400 cursor-pointer select-none w-fit">
             <input
@@ -301,7 +280,6 @@ export default function Home() {
           </label>
         )}
 
-        {/* text + send row */}
         <div className="flex gap-2 items-end">
           <button
             onClick={() => fileRef.current?.click()}

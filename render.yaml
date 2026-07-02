@@ -3,6 +3,11 @@ services:
     name: orkester-api
     env: docker
     dockerfilePath: ./Dockerfile
+    plan: free
     envVars:
       - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MISTRAL_API_KEY
         sync: false
